@@ -259,6 +259,98 @@ def generate_sample_csv(
 
 
 # ---------------------------------------------------------------------------
+# ui command  (Phase B)
+# ---------------------------------------------------------------------------
+
+@app.command()
+def ui(
+    port: int = typer.Option(8501, "--port", "-p", help="Streamlit server port"),
+    browser: bool = typer.Option(True, "--browser/--no-browser", help="Open browser automatically"),
+) -> None:
+    """Launch the EnergeX interactive Streamlit dashboard (Phase B)."""
+    import subprocess, sys
+    from pathlib import Path
+
+    app_path = Path(__file__).parent / "streamlit_app.py"
+    if not app_path.exists():
+        console.print(f"[red]Streamlit app not found at {app_path}[/red]")
+        raise typer.Exit(1)
+
+    console.rule("[bold cyan]EnergeX — Streamlit Dashboard[/bold cyan]")
+    console.print(f"  Launching UI on [link]http://localhost:{port}[/link]")
+    console.print("  Press Ctrl+C to stop.\n")
+
+    cmd = [
+        sys.executable, "-m", "streamlit", "run",
+        str(app_path),
+        "--server.port", str(port),
+        f"--server.headless={'false' if browser else 'true'}",
+        "--theme.primaryColor", "#1A237E",
+    ]
+    try:
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]UI stopped.[/yellow]")
+
+
+# ---------------------------------------------------------------------------
+# pdf command  (Phase B)
+# ---------------------------------------------------------------------------
+
+@app.command()
+def pdf(
+    config: Path = typer.Option(
+        ..., "--config", "-c",
+        help="Path to config JSON/YAML file",
+        exists=True, readable=True, resolve_path=True,
+    ),
+    output: Path = typer.Option(
+        Path("energex_report.pdf"), "--output", "-o",
+        help="Output PDF path",
+    ),
+    seed: int = typer.Option(42, "--seed", "-s", help="Random seed"),
+    sensitivity: bool = typer.Option(
+        False, "--sensitivity/--no-sensitivity",
+        help="Include sensitivity tornado charts in PDF",
+    ),
+) -> None:
+    """Generate a PDF report (management summary + engineering appendix)."""
+    from energex.adapters.config_loader import load_config
+    from energex.engine.runner import run_simulation, run_grid_only_baseline
+    from energex.adapters.pdf_report import generate_pdf
+    from energex.engine.finance_engine import SensitivityEngine
+
+    console.rule("[bold cyan]EnergeX — PDF Report Generator[/bold cyan]")
+
+    with console.status("Loading config..."):
+        cfg = load_config(config)
+
+    with console.status("Running simulation..."):
+        bl = run_grid_only_baseline(cfg, seed=seed)
+        result = run_simulation(cfg, seed=seed, baseline_npv=bl.npv)
+
+    sens_results = None
+    if sensitivity:
+        with console.status("Running sensitivity analysis..."):
+            try:
+                def runner_fn(c):
+                    r = run_simulation(c, seed=seed)
+                    return r.finance, r.sim_year1
+                se = SensitivityEngine(cfg, runner_fn)
+                sens_results = se.run()
+            except Exception as e:
+                console.print(f"  [yellow]Sensitivity failed: {e}[/yellow]")
+
+    with console.status("Generating PDF..."):
+        pdf_bytes = generate_pdf(result, sens_results)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(pdf_bytes)
+
+    console.print(f"\n[green]✓[/green] PDF report written to: {output}")
+    console.print(f"  Pages: management summary + engineering appendix")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
