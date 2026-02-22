@@ -1,0 +1,57 @@
+{
+  "_comment": "EnergeX Config — Grid + BESS Backup (commercial building, 100 kW avg load)",
+  "name": "Commercial Building — Grid + BESS Backup",
+  "project_lifetime_years": 25,
+  "discount_rate_pct": 10.0,
+  "simulation_year": 2025,
+
+  "load": {
+    "mode": "simple",
+    "avg_kw": 100.0,
+    "peak_kw": 140.0,
+    "critical_fraction": 0.35
+  },
+
+  "outage": {
+    "mode": "stochastic",
+    "stochastic": {
+      "saidi_minutes_per_year": 1200,
+      "saifi_events_per_year": 18,
+      "duration_distribution": "lognormal",
+      "duration_sigma": 0.9,
+      "monthly_weights": [1.0, 1.0, 1.0, 1.2, 1.5, 2.0, 2.5, 2.5, 1.8, 1.2, 1.0, 1.0]
+    }
+  },
+
+  "grid": {
+    "energy_rate_rs_kwh": 8.5,
+    "fixed_charge_rs_month": 5000,
+    "escalation_pct_yr": 5.0
+  },
+
+  "bess": {
+    "capacity_kwh": 150.0,
+    "power_kw": 75.0,
+    "dod_pct": 90.0,
+    "roundtrip_efficiency": 0.92,
+    "min_reserve_soc_pct": 10.0,
+    "initial_soc_pct": 90.0,
+    "calendar_fade_pct_yr": 2.0,
+    "cycle_fade_per_kwh": 0.000025,
+    "calendar_life_yr": 12.0,
+    "eol_capacity_pct": 80.0,
+    "capex_rs_kwh": 35000,
+    "replacement_cost_fraction": 0.60,
+    "om_rs_kwh_yr": 500,
+    "availability_pct": 99.0
+  },
+
+  "outage_cost": {
+    "mode": "voll",
+    "voll_rs_kwh": 150.0,
+    "sla_max_downtime_hrs_yr": 8.0,
+    "sla_max_ens_kwh_yr": 500.0,
+    "sla_continuity_pct": 99.9,
+    "sla_min_autonomy_hours": 4.0
+  }
+}

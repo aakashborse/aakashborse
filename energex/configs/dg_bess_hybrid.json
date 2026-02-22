@@ -1,0 +1,83 @@
+{
+  "_comment": "EnergeX Config — Full Hybrid: Grid + DG + BESS (telecom tower cluster / warehouse)",
+  "name": "Telecom/Warehouse — Grid + DG + BESS Hybrid",
+  "project_lifetime_years": 20,
+  "discount_rate_pct": 11.0,
+  "simulation_year": 2025,
+
+  "load": {
+    "mode": "simple",
+    "avg_kw": 150.0,
+    "peak_kw": 210.0,
+    "critical_fraction": 0.6
+  },
+
+  "outage": {
+    "mode": "stochastic",
+    "stochastic": {
+      "saidi_minutes_per_year": 1800,
+      "saifi_events_per_year": 25,
+      "duration_distribution": "lognormal",
+      "duration_sigma": 1.1,
+      "monthly_weights": [1.0, 1.0, 1.0, 1.2, 1.5, 2.2, 3.0, 3.0, 2.0, 1.3, 1.0, 1.0]
+    }
+  },
+
+  "grid": {
+    "energy_rate_rs_kwh": 8.0,
+    "fixed_charge_rs_month": 12000,
+    "escalation_pct_yr": 5.5
+  },
+
+  "dg": {
+    "rated_kw": 125.0,
+    "min_loading_pct": 25.0,
+    "start_delay_seconds": 12.0,
+    "ramp_rate_kw_s": 15.0,
+    "part_load_curve": [
+      {"load_fraction": 0.25, "fuel_lph": 17.5},
+      {"load_fraction": 0.50, "fuel_lph": 28.0},
+      {"load_fraction": 0.75, "fuel_lph": 38.5},
+      {"load_fraction": 1.00, "fuel_lph": 47.5}
+    ],
+    "diesel_price_rs_l": 96.0,
+    "diesel_escalation_pct_yr": 6.0,
+    "om_rs_kwh": 1.8,
+    "om_rs_hour": 60.0,
+    "availability_pct": 92.0,
+    "maintenance_hours_yr": 300,
+    "capex_rs": 900000,
+    "fuel_storage_liters": 1500
+  },
+
+  "bess": {
+    "capacity_kwh": 120.0,
+    "power_kw": 80.0,
+    "dod_pct": 85.0,
+    "roundtrip_efficiency": 0.92,
+    "min_reserve_soc_pct": 20.0,
+    "initial_soc_pct": 90.0,
+    "calendar_fade_pct_yr": 2.0,
+    "cycle_fade_per_kwh": 0.00003,
+    "calendar_life_yr": 10.0,
+    "eol_capacity_pct": 80.0,
+    "capex_rs_kwh": 33000,
+    "replacement_cost_fraction": 0.60,
+    "om_rs_kwh_yr": 550,
+    "availability_pct": 98.5
+  },
+
+  "outage_cost": {
+    "mode": "downtime",
+    "downtime_cost_rs_hr": 75000.0,
+    "tiered_penalties": [
+      {"threshold_minutes": 15.0, "cost_rs_hr": 30000.0},
+      {"threshold_minutes": 60.0, "cost_rs_hr": 75000.0},
+      {"threshold_minutes": 999999, "cost_rs_hr": 120000.0}
+    ],
+    "sla_max_downtime_hrs_yr": 5.0,
+    "sla_max_ens_kwh_yr": 200.0,
+    "sla_continuity_pct": 99.95,
+    "sla_min_autonomy_hours": 6.0
+  }
+}

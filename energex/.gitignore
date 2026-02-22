@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+.env
+.pytest_cache/
+.coverage
+htmlcov/
+energex_output/
+outputs/
+sample_data/
