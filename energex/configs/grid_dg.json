@@ -1,0 +1,53 @@
+{
+  "_comment": "EnergeX Config — Grid + DG Backup (industrial, 200 kW avg load)",
+  "name": "Industrial Site — Grid + DG Backup",
+  "project_lifetime_years": 15,
+  "discount_rate_pct": 12.0,
+  "simulation_year": 2025,
+
+  "load": {
+    "mode": "simple",
+    "avg_kw": 200.0,
+    "peak_kw": 280.0,
+    "critical_fraction": 0.5
+  },
+
+  "outage": {
+    "mode": "stochastic",
+    "stochastic": {
+      "saidi_minutes_per_year": 900,
+      "saifi_events_per_year": 12,
+      "duration_distribution": "lognormal",
+      "duration_sigma": 0.7
+    }
+  },
+
+  "grid": {
+    "energy_rate_rs_kwh": 7.5,
+    "fixed_charge_rs_month": 15000,
+    "escalation_pct_yr": 5.0
+  },
+
+  "dg": {
+    "rated_kw": 160.0,
+    "min_loading_pct": 30.0,
+    "start_delay_seconds": 15.0,
+    "ramp_rate_kw_s": 20.0,
+    "fuel_l_per_kwh": 0.28,
+    "diesel_price_rs_l": 95.0,
+    "diesel_escalation_pct_yr": 6.0,
+    "om_rs_kwh": 1.5,
+    "om_rs_hour": 50.0,
+    "availability_pct": 93.0,
+    "maintenance_hours_yr": 250,
+    "capex_rs": 1200000,
+    "fuel_storage_liters": 2000
+  },
+
+  "outage_cost": {
+    "mode": "downtime",
+    "downtime_cost_rs_hr": 50000.0,
+    "sla_max_downtime_hrs_yr": 20.0,
+    "sla_min_autonomy_hours": 8.0
+  }
+}
