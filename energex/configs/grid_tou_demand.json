@@ -1,0 +1,102 @@
+{
+  "_comment": "EnergeX Example Config — Grid + BESS with TOU tariff + demand charges",
+  "_description": "Commercial building with TOU tariff (peak 9-17h @ ₹12, off-peak @ ₹5) and monthly demand charges. BESS provides backup + peak shaving.",
+
+  "name": "Commercial Office — TOU + Demand Charges",
+  "project_lifetime_years": 25,
+  "discount_rate_pct": 10.0,
+  "simulation_year": 2025,
+
+  "load": {
+    "mode": "simple",
+    "avg_kw": 80.0,
+    "peak_kw": 120.0,
+    "critical_fraction": 0.35
+  },
+
+  "outage": {
+    "mode": "stochastic",
+    "stochastic": {
+      "saidi_minutes_per_year": 900,
+      "saifi_events_per_year": 10,
+      "duration_distribution": "lognormal",
+      "duration_sigma": 0.7
+    }
+  },
+
+  "grid": {
+    "energy_rate_rs_kwh": 8.0,
+    "fixed_charge_rs_month": 500,
+    "escalation_pct_yr": 5.0,
+    "tou_schedule": {
+      "rate_bands": [
+        {
+          "name": "peak",
+          "hours_of_day": [9, 10, 11, 12, 13, 14, 15, 16, 17],
+          "rate_rs_kwh": 12.0
+        },
+        {
+          "name": "off_peak",
+          "hours_of_day": [22, 23, 0, 1, 2, 3, 4, 5],
+          "rate_rs_kwh": 5.0
+        },
+        {
+          "name": "shoulder",
+          "hours_of_day": [6, 7, 8, 18, 19, 20, 21],
+          "rate_rs_kwh": 8.0
+        }
+      ],
+      "default_rate_rs_kwh": 8.0
+    },
+    "demand_charge": {
+      "charge_rs_kva_month": 350.0,
+      "power_factor": 0.9,
+      "measurement_window_hours": 0.5,
+      "peak_hours_only": false
+    },
+    "peak_shaving_enabled": true,
+    "peak_shaving_target_kw": 65.0
+  },
+
+  "outage_cost": {
+    "mode": "voll",
+    "voll_rs_kwh": 150.0,
+    "sla_max_downtime_hrs_yr": 4.0,
+    "sla_max_ens_kwh_yr": 200.0,
+    "sla_continuity_pct": 99.9,
+    "sla_min_autonomy_hours": 2.0
+  },
+
+  "bess": {
+    "capacity_kwh": 200.0,
+    "power_kw": 100.0,
+    "dod_pct": 90.0,
+    "roundtrip_efficiency": 0.92,
+    "min_reserve_soc_pct": 10.0,
+    "initial_soc_pct": 90.0,
+    "calendar_fade_pct_yr": 2.0,
+    "cycle_fade_per_kwh": 0.000025,
+    "calendar_life_yr": 12.0,
+    "eol_capacity_pct": 80.0,
+    "capex_rs_kwh": 22000.0,
+    "om_rs_kwh_yr": 500.0,
+    "availability_pct": 99.0
+  },
+
+  "monte_carlo": {
+    "n_runs": 200,
+    "base_seed": 42,
+    "percentiles": [10.0, 25.0, 50.0, 75.0, 90.0, 99.0],
+    "n_years_per_run": 1
+  },
+
+  "sizing_bounds": {
+    "bess_capacity_min_kwh": 0.0,
+    "bess_capacity_max_kwh": 400.0,
+    "bess_capacity_step_kwh": 50.0,
+    "bess_power_to_capacity_ratio": 0.5,
+    "include_dg": false,
+    "include_solar": false,
+    "n_years_per_eval": 3
+  }
+}

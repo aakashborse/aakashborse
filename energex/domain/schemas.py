@@ -12,6 +12,132 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
+# TOU Tariff helpers
+# ---------------------------------------------------------------------------
+
+class TOURateBand(BaseModel):
+    """A time-of-use rate band mapping hours-of-day to a rate."""
+    name: str = Field("peak", description="Band name, e.g. 'peak', 'off_peak', 'shoulder'")
+    hours_of_day: list[int] = Field(
+        ..., description="Hours of day (0–23) that belong to this band"
+    )
+    rate_rs_kwh: float = Field(..., ge=0, description="Energy rate for this band (₹/kWh)")
+
+    @field_validator("hours_of_day")
+    @classmethod
+    def validate_hours(cls, v: list[int]) -> list[int]:
+        if not v:
+            raise ValueError("hours_of_day must have at least one entry")
+        if any(h < 0 or h > 23 for h in v):
+            raise ValueError("hours_of_day values must be in 0–23")
+        return v
+
+
+class TOUSchedule(BaseModel):
+    """Time-of-use schedule — a collection of rate bands covering 24 hours."""
+    rate_bands: list[TOURateBand] = Field(
+        ..., description="List of rate bands (may overlap; first match wins)"
+    )
+    default_rate_rs_kwh: float = Field(
+        ..., ge=0,
+        description="Fallback rate used when hour is not covered by any band (₹/kWh)"
+    )
+
+    def rate_for_hour(self, hour_of_day: int) -> float:
+        """Return the applicable TOU rate for a given hour of the day (0–23)."""
+        for band in self.rate_bands:
+            if hour_of_day in band.hours_of_day:
+                return band.rate_rs_kwh
+        return self.default_rate_rs_kwh
+
+    def is_peak_hour(self, hour_of_day: int) -> bool:
+        """Return True if the given hour falls in a band named 'peak'."""
+        for band in self.rate_bands:
+            if band.name.lower() == "peak" and hour_of_day in band.hours_of_day:
+                return True
+        return False
+
+
+class DemandChargeModel(BaseModel):
+    """Monthly demand (kVA/kW) charge configuration."""
+    charge_rs_kva_month: float = Field(
+        ..., ge=0, description="Demand charge (₹/kVA/month or ₹/kW/month)"
+    )
+    power_factor: float = Field(
+        0.9, gt=0, le=1.0,
+        description="Power factor used to convert kW to kVA. Set to 1.0 for ₹/kW billing."
+    )
+    measurement_window_hours: float = Field(
+        0.5, gt=0,
+        description="Averaging window for peak demand measurement (hours). Typically 0.5 hr."
+    )
+    peak_hours_only: bool = Field(
+        False,
+        description="If True, demand charge applies only during TOU peak hours."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Monte Carlo Config
+# ---------------------------------------------------------------------------
+
+class MonteCarloConfig(BaseModel):
+    """Configuration for Monte Carlo uncertainty analysis."""
+    n_runs: int = Field(200, ge=10, le=5000, description="Number of Monte Carlo runs")
+    base_seed: int = Field(42, ge=0, description="Base random seed (each run gets base_seed + i)")
+    percentiles: list[float] = Field(
+        [10.0, 25.0, 50.0, 75.0, 90.0, 99.0],
+        description="Percentile bands to compute (e.g. [10, 50, 90])"
+    )
+    n_years_per_run: int = Field(
+        1, ge=1, le=5,
+        description="Number of simulation years per MC run (1 = year-1 only for speed)"
+    )
+
+    @field_validator("percentiles")
+    @classmethod
+    def validate_percentiles(cls, v: list[float]) -> list[float]:
+        if not v:
+            raise ValueError("percentiles list must not be empty")
+        if any(p < 0 or p > 100 for p in v):
+            raise ValueError("percentiles must be in [0, 100]")
+        return sorted(v)
+
+
+# ---------------------------------------------------------------------------
+# Sizing Optimizer Bounds
+# ---------------------------------------------------------------------------
+
+class SizingBounds(BaseModel):
+    """Search bounds for automated optimal sizing."""
+    # BESS sizing
+    bess_capacity_min_kwh: float = Field(0.0, ge=0, description="Min BESS capacity to evaluate (kWh)")
+    bess_capacity_max_kwh: float = Field(500.0, gt=0, description="Max BESS capacity to evaluate (kWh)")
+    bess_capacity_step_kwh: float = Field(50.0, gt=0, description="BESS capacity sweep step (kWh)")
+    bess_power_to_capacity_ratio: float = Field(
+        0.5, gt=0, description="BESS power (kW) = capacity × this ratio"
+    )
+
+    # DG sizing
+    include_dg: bool = Field(False, description="Include DG sizing in search space")
+    dg_kw_min: float = Field(0.0, ge=0, description="Min DG size to evaluate (kW)")
+    dg_kw_max: float = Field(300.0, gt=0, description="Max DG size to evaluate (kW)")
+    dg_kw_step: float = Field(50.0, gt=0, description="DG size sweep step (kW)")
+
+    # Solar sizing
+    include_solar: bool = Field(False, description="Include Solar sizing in search space")
+    solar_kw_min: float = Field(0.0, ge=0, description="Min Solar size to evaluate (kWp)")
+    solar_kw_max: float = Field(300.0, gt=0, description="Max Solar size to evaluate (kWp)")
+    solar_kw_step: float = Field(50.0, gt=0, description="Solar size sweep step (kWp)")
+
+    # Evaluation settings
+    n_years_per_eval: int = Field(
+        3, ge=1, le=10,
+        description="Number of simulation years per candidate evaluation (trade-off: speed vs accuracy)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Enumerations
 # ---------------------------------------------------------------------------
 
@@ -150,11 +276,39 @@ class OutageModel(BaseModel):
 # ---------------------------------------------------------------------------
 
 class GridTariffModel(BaseModel):
-    """Grid electricity tariff."""
+    """Grid electricity tariff (flat or time-of-use)."""
 
-    energy_rate_rs_kwh: float = Field(..., ge=0, description="Energy rate (₹/kWh)")
+    energy_rate_rs_kwh: float = Field(..., ge=0, description="Flat energy rate (₹/kWh). Used when no TOU schedule.")
     fixed_charge_rs_month: float = Field(0.0, ge=0, description="Fixed monthly charge (₹/month)")
     escalation_pct_yr: float = Field(5.0, ge=0, description="Annual tariff escalation (%/yr)")
+
+    # TOU schedule (optional — overrides energy_rate_rs_kwh when set)
+    tou_schedule: Optional[TOUSchedule] = Field(
+        None, description="Time-of-use rate schedule. When set, overrides energy_rate_rs_kwh."
+    )
+
+    # Demand charges (optional)
+    demand_charge: Optional[DemandChargeModel] = Field(
+        None, description="Monthly demand charge config. Adds ₹/kVA-month billing."
+    )
+
+    # BESS peak shaving
+    peak_shaving_enabled: bool = Field(
+        True, description="Allow BESS to shave peak grid demand during grid-up hours."
+    )
+    peak_shaving_target_kw: Optional[float] = Field(
+        None, ge=0,
+        description="Target peak demand (kW) for BESS peak shaving. Defaults to 80% of avg load."
+    )
+
+    def rate_for_hour(self, hour_of_year: int, escalation_factor: float = 1.0) -> float:
+        """Return the applicable energy rate (₹/kWh) for a given absolute hour."""
+        hod = hour_of_year % 24
+        if self.tou_schedule is not None:
+            base_rate = self.tou_schedule.rate_for_hour(hod)
+        else:
+            base_rate = self.energy_rate_rs_kwh
+        return base_rate * escalation_factor
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +576,14 @@ class ProjectConfig(BaseModel):
     dg: Optional[DGBackupModel] = None
     bess: Optional[BESSBackupModel] = None
     solar: Optional[SolarModel] = None
+
+    # Phase C optional configs
+    monte_carlo: Optional[MonteCarloConfig] = Field(
+        None, description="Monte Carlo uncertainty analysis configuration."
+    )
+    sizing_bounds: Optional[SizingBounds] = Field(
+        None, description="Sizing optimizer search bounds."
+    )
 
     # Scenario type (auto-derived if not given)
     scenario: Optional[ScenarioType] = None

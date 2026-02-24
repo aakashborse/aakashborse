@@ -56,6 +56,8 @@ def _init_state() -> None:
         "config_dict": None,
         "sensitivity_results": None,
         "run_seed": 42,
+        "mc_result": None,      # Phase C: Monte Carlo result
+        "opt_result": None,     # Phase C: Optimizer result
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -489,6 +491,25 @@ def _tab_energy_flows(result: RunResult) -> None:
         png = mpl_energy_pie(sim)
         st.image(png, use_container_width=True)
 
+    # TOU demand profile (Phase C)
+    if result.config.grid.tou_schedule is not None or sim.total_peak_shaving_kwh > 0:
+        st.divider()
+        st.subheader("TOU & Peak Shaving Profile")
+        from energex.adapters.charts import plotly_tou_demand_profile
+        st.plotly_chart(
+            plotly_tou_demand_profile(sim, result.config),
+            use_container_width=True,
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Total BESS Peak Shaving", f"{sim.total_peak_shaving_kwh:,.0f} kWh/yr")
+        with col2:
+            if sim.monthly_peak_grid_kw:
+                st.metric(
+                    "Peak Monthly Grid Demand",
+                    f"{max(sim.monthly_peak_grid_kw):,.1f} kW",
+                )
+
 
 # ---------------------------------------------------------------------------
 # Tab: Financial
@@ -714,13 +735,15 @@ def main() -> None:
         _show_landing(cfg_dict)
         return
 
-    # Tabs
+    # Tabs (Phase C adds Monte Carlo and Optimizer tabs)
     tabs = st.tabs([
         "📊 Overview",
         "🔴 Reliability",
         "⚡ Energy Flows",
         "💰 Financial",
         "🌪 Sensitivity",
+        "🎲 Monte Carlo",
+        "🎯 Optimizer",
         "📥 Export",
         "🔧 Config",
     ])
@@ -736,9 +759,215 @@ def main() -> None:
     with tabs[4]:
         _tab_sensitivity(result)
     with tabs[5]:
-        _tab_export(result)
+        _tab_monte_carlo(result)
     with tabs[6]:
+        _tab_optimizer(result)
+    with tabs[7]:
+        _tab_export(result)
+    with tabs[8]:
         _tab_config(st.session_state.config_dict or {})
+
+
+def _tab_monte_carlo(result: RunResult) -> None:
+    """Phase C — Monte Carlo uncertainty analysis tab."""
+    import streamlit as st
+    from energex.engine.monte_carlo import MonteCarloEngine
+    from energex.domain.schemas import MonteCarloConfig
+    from energex.adapters.charts import (
+        plotly_mc_distribution, plotly_mc_bands, plotly_mc_summary_table
+    )
+
+    st.subheader("🎲 Monte Carlo Uncertainty Analysis")
+    st.caption(
+        "Runs N independent simulations with different outage seeds to produce "
+        "statistically defensible P10/P50/P90/P99 confidence intervals."
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        n_runs = st.slider("Number of runs", 50, 1000, 200, step=50,
+                           help="More runs = tighter confidence intervals (slower)")
+    with col2:
+        base_seed = st.number_input("Base seed", value=42, min_value=0,
+                                    help="Each run gets base_seed + run_index")
+    with col3:
+        n_years = st.slider("Years per run", 1, 3, 1,
+                            help="1 = fastest; 3 = more accurate multi-year average")
+
+    if st.button("▶ Run Monte Carlo", type="primary"):
+        with st.spinner(f"Running {n_runs} simulations..."):
+            try:
+                mc_cfg = MonteCarloConfig(
+                    n_runs=n_runs,
+                    base_seed=int(base_seed),
+                    n_years_per_run=n_years,
+                )
+                engine = MonteCarloEngine(result.config, mc_config=mc_cfg)
+                mc_result = engine.run()
+                st.session_state["mc_result"] = mc_result
+            except Exception as e:
+                st.error(f"Monte Carlo failed: {e}")
+                return
+
+    mc_result = st.session_state.get("mc_result")
+    if mc_result is None:
+        st.info("Configure settings above and click **▶ Run Monte Carlo** to start.")
+        return
+
+    # KPI row
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("SLA Pass Rate", f"{mc_result.sla_pass_rate_pct:.1f}%",
+                  delta=None,
+                  help="% of runs where all SLA targets are met")
+    with col2:
+        if mc_result.ens_stats:
+            st.metric("ENS P50", f"{mc_result.ens_stats.p50:,.1f} kWh/yr")
+    with col3:
+        if mc_result.ens_stats:
+            st.metric("ENS P90", f"{mc_result.ens_stats.p90:,.1f} kWh/yr")
+    with col4:
+        if mc_result.ens_stats:
+            st.metric("ENS P99", f"{mc_result.ens_stats.p99:,.1f} kWh/yr")
+
+    st.divider()
+
+    # Summary table
+    st.plotly_chart(plotly_mc_summary_table(mc_result), use_container_width=True)
+
+    # Distribution charts
+    st.subheader("ENS Distribution")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.plotly_chart(
+            plotly_mc_distribution(mc_result, "ens_kwh", "ENS Distribution (kWh/yr)"),
+            use_container_width=True,
+        )
+    with col2:
+        st.plotly_chart(plotly_mc_bands(mc_result), use_container_width=True)
+
+    st.subheader("Downtime & Continuity Distributions")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.plotly_chart(
+            plotly_mc_distribution(mc_result, "downtime_hours", "Downtime Distribution (hrs/yr)"),
+            use_container_width=True,
+        )
+    with col2:
+        st.plotly_chart(
+            plotly_mc_distribution(mc_result, "continuity_pct", "Continuity Distribution (%)"),
+            use_container_width=True,
+        )
+
+    # Download raw data
+    import json
+    st.download_button(
+        "⬇ Download MC Results (JSON)",
+        data=json.dumps(mc_result.to_dict(), indent=2),
+        file_name="monte_carlo_results.json",
+        mime="application/json",
+    )
+
+
+def _tab_optimizer(result: RunResult) -> None:
+    """Phase C — Automated sizing optimizer tab."""
+    import streamlit as st
+    from energex.engine.optimizer import SizingOptimizer
+    from energex.domain.schemas import SizingBounds
+    from energex.adapters.charts import plotly_pareto_frontier, plotly_sizing_heatmap
+
+    st.subheader("🎯 Automated Optimal Sizing")
+    st.caption(
+        "Grid sweep over BESS / DG / Solar sizes. "
+        "Finds the Pareto frontier in (CAPEX, ENS) space and the least-cost SLA-feasible configuration."
+    )
+
+    with st.expander("🔧 Search Space Settings", expanded=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            bess_max = st.slider("Max BESS (kWh)", 50, 1000, 400, step=50)
+            bess_step = st.slider("BESS step (kWh)", 25, 200, 50, step=25)
+        with col2:
+            n_years = st.slider("Years per evaluation", 1, 5, 3)
+            include_dg = st.checkbox("Include DG in sweep", value=False)
+            include_solar = st.checkbox("Include Solar in sweep", value=False)
+
+        # Estimate candidate count
+        n_bess = len(range(0, int(bess_max) + 1, int(bess_step))) + 1
+        n_dg = 7 if include_dg else 1
+        n_solar = 7 if include_solar else 1
+        est = n_bess * n_dg * n_solar
+        st.info(f"Estimated candidates: ~{est} × {n_years} years = ~{est * n_years} simulations")
+
+    if st.button("▶ Run Optimizer", type="primary"):
+        with st.spinner("Optimizing... (this may take a minute for large grids)"):
+            try:
+                bounds = SizingBounds(
+                    bess_capacity_max_kwh=float(bess_max),
+                    bess_capacity_step_kwh=float(bess_step),
+                    include_dg=include_dg,
+                    include_solar=include_solar,
+                    n_years_per_eval=n_years,
+                )
+                optimizer = SizingOptimizer(result.config, bounds=bounds)
+                opt_result = optimizer.run()
+                st.session_state["opt_result"] = opt_result
+            except Exception as e:
+                st.error(f"Optimizer failed: {e}")
+                return
+
+    opt_result = st.session_state.get("opt_result")
+    if opt_result is None:
+        st.info("Configure settings and click **▶ Run Optimizer** to start.")
+        return
+
+    # Summary
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Candidates Evaluated", opt_result.n_candidates_evaluated)
+    with col2:
+        st.metric("SLA-Feasible Configs", opt_result.n_sla_feasible)
+    with col3:
+        st.metric("Pareto Points", len(opt_result.pareto_points))
+
+    st.divider()
+
+    # Optimal config
+    if opt_result.optimal_point:
+        opt = opt_result.optimal_point
+        st.success(
+            f"**Optimal Configuration (least-cost SLA-feasible)**  \n"
+            f"BESS: **{opt.bess_kwh:.0f} kWh / {opt.bess_kw:.0f} kW** | "
+            f"DG: **{opt.dg_kw:.0f} kW** | "
+            f"Solar: **{opt.solar_kwp:.0f} kWp**  \n"
+            f"CAPEX: **₹{opt.capex_rs/1e5:.1f}L** | "
+            f"ENS: **{opt.avg_ens_kwh:.1f} kWh/yr** | "
+            f"Continuity: **{opt.avg_continuity_pct:.4f}%**"
+        )
+    else:
+        st.warning("No SLA-feasible configuration found. Consider relaxing SLA targets or expanding the search space.")
+
+    # Pareto frontier chart
+    st.plotly_chart(plotly_pareto_frontier(opt_result), use_container_width=True)
+
+    # Heatmap
+    st.plotly_chart(plotly_sizing_heatmap(opt_result), use_container_width=True)
+
+    # Pareto table
+    if opt_result.pareto_points:
+        st.subheader("Pareto Frontier Points")
+        import pandas as pd
+        df = pd.DataFrame([p.to_dict() for p in opt_result.pareto_points])
+        st.dataframe(df, use_container_width=True)
+
+    # Download
+    import json
+    st.download_button(
+        "⬇ Download Optimizer Results (JSON)",
+        data=json.dumps(opt_result.to_dict(), indent=2),
+        file_name="optimizer_results.json",
+        mime="application/json",
+    )
 
 
 def _show_landing(cfg_dict: Optional[dict]) -> None:

@@ -619,3 +619,424 @@ def _fig_to_bytes(fig: MplFigure) -> bytes:
     plt.close(fig)
     buf.seek(0)
     return buf.read()
+
+
+# ---------------------------------------------------------------------------
+# Phase C — Monte Carlo Charts
+# ---------------------------------------------------------------------------
+
+def plotly_mc_distribution(
+    mc_result,
+    metric: str = "ens_kwh",
+    title: str = "Monte Carlo ENS Distribution",
+) -> go.Figure:
+    """
+    Histogram + percentile markers for a Monte Carlo metric.
+
+    Parameters
+    ----------
+    mc_result : MonteCarloResult
+    metric : one of 'ens_kwh', 'downtime_hours', 'continuity_pct', 'npv_proxy'
+    """
+    data_map = {
+        "ens_kwh": (mc_result.ens_kwh_runs, mc_result.ens_stats, "ENS (kWh/yr)", COLORS["unserved"]),
+        "downtime_hours": (mc_result.downtime_hours_runs, mc_result.downtime_stats, "Downtime (hrs/yr)", COLORS["outage"]),
+        "continuity_pct": (mc_result.continuity_pct_runs, mc_result.continuity_stats, "Continuity (%)", COLORS["bess"]),
+        "npv_proxy": (mc_result.npv_proxy_runs, mc_result.npv_stats, "NPV Proxy (₹)", COLORS["grid"]),
+    }
+    vals, stats, xlabel, color = data_map.get(metric, (mc_result.ens_kwh_runs, mc_result.ens_stats, "ENS (kWh/yr)", COLORS["unserved"]))
+
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=vals,
+        nbinsx=40,
+        marker_color=color,
+        opacity=0.75,
+        name=xlabel,
+    ))
+
+    if stats:
+        for pct_label, pct_key, line_color in [
+            ("P10", 10.0, "#1565C0"),
+            ("P50", 50.0, "#2E7D32"),
+            ("P90", 90.0, "#B71C1C"),
+            ("P99", 99.0, "#4A148C"),
+        ]:
+            val = stats.percentiles.get(pct_key)
+            if val is not None:
+                fig.add_vline(
+                    x=val,
+                    line_dash="dash",
+                    line_color=line_color,
+                    annotation_text=f"{pct_label}: {val:,.1f}",
+                    annotation_position="top right",
+                    annotation_font_size=10,
+                )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title=xlabel,
+        yaxis_title="Frequency (runs)",
+        bargap=0.05,
+        plot_bgcolor="white",
+        height=400,
+    )
+    return fig
+
+
+def plotly_mc_bands(mc_result) -> go.Figure:
+    """
+    Fan chart showing P10/P25/P50/P75/P90 bands for ENS across the MC run space.
+    """
+    stats = mc_result.ens_stats
+    if stats is None:
+        return go.Figure()
+
+    pcts = sorted(stats.percentiles.keys())
+    vals = [stats.percentiles[p] for p in pcts]
+
+    fig = go.Figure()
+
+    # Fill between P10 and P90
+    p10 = stats.percentiles.get(10.0, stats.min)
+    p90 = stats.percentiles.get(90.0, stats.max)
+    p25 = stats.percentiles.get(25.0, stats.mean)
+    p75 = stats.percentiles.get(75.0, stats.mean)
+    p50 = stats.percentiles.get(50.0, stats.mean)
+
+    # Use bar chart for percentile bands
+    fig.add_trace(go.Bar(
+        x=[f"P{int(p)}" for p in pcts],
+        y=vals,
+        marker_color=[
+            "#BBDEFB" if p < 25 else
+            "#64B5F6" if p < 50 else
+            "#1565C0" if p == 50 else
+            "#64B5F6" if p < 90 else
+            "#BBDEFB"
+            for p in pcts
+        ],
+        text=[f"{v:,.1f}" for v in vals],
+        textposition="outside",
+        name="ENS percentiles",
+    ))
+
+    fig.update_layout(
+        title="Monte Carlo ENS Percentile Bands",
+        xaxis_title="Percentile",
+        yaxis_title="ENS (kWh/yr)",
+        plot_bgcolor="white",
+        height=380,
+        showlegend=False,
+    )
+    return fig
+
+
+def plotly_mc_summary_table(mc_result) -> go.Figure:
+    """Tabular summary of MC stats for all metrics."""
+    rows = []
+    for stats in [
+        mc_result.ens_stats,
+        mc_result.downtime_stats,
+        mc_result.continuity_stats,
+        mc_result.npv_stats,
+    ]:
+        if stats is None:
+            continue
+        p10 = stats.percentiles.get(10.0, stats.min)
+        p50 = stats.percentiles.get(50.0, stats.mean)
+        p90 = stats.percentiles.get(90.0, stats.max)
+        p99 = stats.percentiles.get(99.0, stats.max)
+        rows.append([
+            stats.metric, stats.unit,
+            f"{stats.mean:,.2f}", f"{stats.std:,.2f}",
+            f"{p10:,.2f}", f"{p50:,.2f}", f"{p90:,.2f}", f"{p99:,.2f}",
+        ])
+
+    fig = go.Figure(data=[go.Table(
+        header=dict(
+            values=["Metric", "Unit", "Mean", "Std Dev", "P10", "P50", "P90", "P99"],
+            fill_color="#1565C0",
+            font=dict(color="white", size=11),
+            align="center",
+        ),
+        cells=dict(
+            values=list(zip(*rows)) if rows else [[] for _ in range(8)],
+            fill_color=[["#F5F5F5", "white"] * 10],
+            align="center",
+            font=dict(size=10),
+        ),
+    )])
+    fig.update_layout(
+        title=f"Monte Carlo Statistics ({mc_result.n_runs} runs)",
+        height=300,
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Phase C — Optimizer / Pareto Charts
+# ---------------------------------------------------------------------------
+
+def plotly_pareto_frontier(opt_result) -> go.Figure:
+    """
+    Scatter plot of all sizing candidates with Pareto frontier highlighted.
+    X = CAPEX (₹ Lakhs), Y = avg ENS (kWh/yr).
+    """
+    fig = go.Figure()
+
+    all_pts = opt_result.all_points
+    if not all_pts:
+        return fig
+
+    # Non-pareto points
+    non_pareto = [p for p in all_pts if not p.is_pareto]
+    if non_pareto:
+        fig.add_trace(go.Scatter(
+            x=[p.capex_rs / 1e5 for p in non_pareto],
+            y=[p.avg_ens_kwh for p in non_pareto],
+            mode="markers",
+            marker=dict(color="#B0BEC5", size=6, opacity=0.5),
+            name="Candidates",
+            hovertemplate=(
+                "CAPEX: ₹%{x:.1f}L<br>"
+                "ENS: %{y:.1f} kWh/yr<br>"
+                "<extra></extra>"
+            ),
+        ))
+
+    # Pareto frontier
+    pareto = opt_result.pareto_points
+    if pareto:
+        fig.add_trace(go.Scatter(
+            x=[p.capex_rs / 1e5 for p in pareto],
+            y=[p.avg_ens_kwh for p in pareto],
+            mode="markers+lines",
+            marker=dict(color=COLORS["grid"], size=10, symbol="diamond"),
+            line=dict(color=COLORS["grid"], dash="dash"),
+            name="Pareto Frontier",
+            hovertemplate=(
+                "BESS: %{customdata[0]:.0f} kWh | DG: %{customdata[1]:.0f} kW<br>"
+                "CAPEX: ₹%{x:.1f}L | ENS: %{y:.1f} kWh/yr<br>"
+                "SLA Pass: %{customdata[2]}<extra></extra>"
+            ),
+            customdata=[[p.bess_kwh, p.dg_kw, "Yes" if p.sla_pass else "No"] for p in pareto],
+        ))
+
+    # Optimal point
+    opt = opt_result.optimal_point
+    if opt:
+        fig.add_trace(go.Scatter(
+            x=[opt.capex_rs / 1e5],
+            y=[opt.avg_ens_kwh],
+            mode="markers",
+            marker=dict(color=COLORS["positive"], size=16, symbol="star"),
+            name="Optimal (SLA-feasible)",
+        ))
+
+    fig.update_layout(
+        title="Sizing Optimizer — Pareto Frontier (Cost vs ENS)",
+        xaxis_title="CAPEX (₹ Lakhs)",
+        yaxis_title="Average ENS (kWh/yr)",
+        plot_bgcolor="white",
+        height=450,
+        legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
+    )
+    return fig
+
+
+def plotly_sizing_heatmap(opt_result) -> go.Figure:
+    """
+    Heatmap of ENS across BESS × DG sizes (when both are swept).
+    """
+    pts = opt_result.all_points
+    bess_vals = sorted(set(p.bess_kwh for p in pts))
+    dg_vals = sorted(set(p.dg_kw for p in pts))
+
+    if len(dg_vals) <= 1:
+        # Fall back to bar chart if only BESS swept
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=[f"{p.bess_kwh:.0f} kWh" for p in sorted(pts, key=lambda x: x.bess_kwh)],
+            y=[p.avg_ens_kwh for p in sorted(pts, key=lambda x: x.bess_kwh)],
+            marker_color=[COLORS["bess"] if p.sla_pass else COLORS["negative"] for p in sorted(pts, key=lambda x: x.bess_kwh)],
+            name="ENS",
+        ))
+        fig.update_layout(
+            title="ENS vs BESS Size",
+            xaxis_title="BESS Capacity",
+            yaxis_title="Avg ENS (kWh/yr)",
+            plot_bgcolor="white",
+            height=380,
+        )
+        return fig
+
+    # Build 2D grid
+    z = np.zeros((len(dg_vals), len(bess_vals)))
+    for p in pts:
+        i = dg_vals.index(p.dg_kw)
+        j = bess_vals.index(p.bess_kwh)
+        z[i, j] = p.avg_ens_kwh
+
+    fig = go.Figure(data=go.Heatmap(
+        z=z,
+        x=[f"{v:.0f} kWh" for v in bess_vals],
+        y=[f"{v:.0f} kW" for v in dg_vals],
+        colorscale="RdYlGn_r",
+        colorbar=dict(title="ENS (kWh/yr)"),
+    ))
+    fig.update_layout(
+        title="ENS Heatmap: BESS (kWh) × DG (kW)",
+        xaxis_title="BESS Capacity (kWh)",
+        yaxis_title="DG Size (kW)",
+        height=400,
+    )
+    return fig
+
+
+def plotly_tou_demand_profile(sim_result, config=None) -> go.Figure:
+    """
+    24-hour average load and TOU rate overlay chart.
+    Shows peak/off-peak periods and average grid draw by hour-of-day.
+    """
+    if not sim_result.hourly:
+        return go.Figure()
+
+    # Average load and grid draw by hour of day
+    hourly_data = sim_result.hourly
+    hod_load = np.zeros(24)
+    hod_grid = np.zeros(24)
+    hod_rate = np.zeros(24)
+    hod_shave = np.zeros(24)
+    counts = np.zeros(24)
+
+    for h in hourly_data:
+        hod = h.hour % 24
+        hod_load[hod] += h.total_load_kwh
+        hod_grid[hod] += h.grid_to_load + h.grid_to_bess
+        hod_rate[hod] += h.tou_rate_rs_kwh
+        hod_shave[hod] += h.bess_peak_shaving_kwh
+        counts[hod] += 1
+
+    counts = np.where(counts == 0, 1, counts)
+    hod_load /= counts
+    hod_grid /= counts
+    hod_rate /= counts
+    hod_shave /= counts
+
+    hours = list(range(24))
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        subplot_titles=("Avg Load & Grid Draw (kWh/hr)", "TOU Rate & Peak Shaving"),
+        row_heights=[0.6, 0.4],
+    )
+
+    fig.add_trace(go.Bar(
+        x=hours, y=hod_load.tolist(),
+        name="Total Load",
+        marker_color=COLORS["grid"],
+        opacity=0.5,
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=hours, y=hod_grid.tolist(),
+        name="Grid Draw",
+        mode="lines+markers",
+        line=dict(color=COLORS["negative"], width=2),
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=hours, y=hod_shave.tolist(),
+        name="BESS Peak Shaving",
+        mode="lines",
+        fill="tozeroy",
+        fillcolor="rgba(76,175,80,0.3)",
+        line=dict(color=COLORS["bess"]),
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=hours, y=hod_rate.tolist(),
+        name="TOU Rate (₹/kWh)",
+        mode="lines+markers",
+        line=dict(color=COLORS["dg"], width=2),
+        marker=dict(size=6),
+    ), row=2, col=1)
+
+    fig.update_layout(
+        title="Time-of-Use Demand Profile (24-hour average)",
+        xaxis2_title="Hour of Day",
+        plot_bgcolor="white",
+        height=500,
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Phase C — Matplotlib static charts for PDF
+# ---------------------------------------------------------------------------
+
+def mpl_mc_bands(mc_result) -> bytes:
+    """Matplotlib percentile bands bar chart for PDF embedding."""
+    stats = mc_result.ens_stats
+    if stats is None:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.text(0.5, 0.5, "No ENS data", ha="center", va="center", transform=ax.transAxes)
+        return _fig_to_bytes(fig)
+
+    pcts = sorted(stats.percentiles.keys())
+    vals = [stats.percentiles[p] for p in pcts]
+    labels = [f"P{int(p)}" for p in pcts]
+
+    fig, ax = plt.subplots(figsize=(7, 3))
+    bar_colors = ["#BBDEFB" if p < 25 else "#64B5F6" if p < 50 else "#1565C0" if p == 50 else "#64B5F6" if p < 90 else "#BBDEFB" for p in pcts]
+    bars = ax.bar(labels, vals, color=bar_colors, edgecolor="white")
+    for bar, val in zip(bars, vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5, f"{val:.1f}", ha="center", va="bottom", fontsize=8)
+    ax.set_title(f"MC ENS Percentile Bands ({mc_result.n_runs} runs)", fontsize=11)
+    ax.set_xlabel("Percentile")
+    ax.set_ylabel("ENS (kWh/yr)")
+    ax.set_facecolor("#FAFAFA")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.tight_layout()
+    return _fig_to_bytes(fig)
+
+
+def mpl_pareto_frontier(opt_result) -> bytes:
+    """Matplotlib Pareto scatter for PDF."""
+    fig, ax = plt.subplots(figsize=(7, 4))
+
+    all_pts = opt_result.all_points
+    non_pareto = [p for p in all_pts if not p.is_pareto]
+    pareto = opt_result.pareto_points
+
+    if non_pareto:
+        ax.scatter(
+            [p.capex_rs / 1e5 for p in non_pareto],
+            [p.avg_ens_kwh for p in non_pareto],
+            c="#B0BEC5", s=20, alpha=0.5, label="Candidates",
+        )
+    if pareto:
+        xs = [p.capex_rs / 1e5 for p in pareto]
+        ys = [p.avg_ens_kwh for p in pareto]
+        ax.scatter(xs, ys, c="#1565C0", s=60, marker="D", label="Pareto Frontier", zorder=3)
+        ax.plot(xs, ys, "--", color="#1565C0", alpha=0.6)
+
+    opt = opt_result.optimal_point
+    if opt:
+        ax.scatter(
+            [opt.capex_rs / 1e5], [opt.avg_ens_kwh],
+            c="#43A047", s=120, marker="*", label="Optimal", zorder=4,
+        )
+
+    ax.set_xlabel("CAPEX (₹ Lakhs)")
+    ax.set_ylabel("Avg ENS (kWh/yr)")
+    ax.set_title("Sizing Optimizer — Pareto Frontier")
+    ax.legend(fontsize=8)
+    ax.set_facecolor("#FAFAFA")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.tight_layout()
+    return _fig_to_bytes(fig)

@@ -71,6 +71,10 @@ class HourlyResult:
     # Reliability
     downtime_hours: float = 0.0        # hours of critical load unmet
 
+    # TOU / demand tracking
+    tou_rate_rs_kwh: float = 0.0       # effective TOU rate this hour (₹/kWh)
+    bess_peak_shaving_kwh: float = 0.0  # kWh shifted from grid by BESS peak shaving
+
 
 # ---------------------------------------------------------------------------
 # Simulation result container
@@ -102,6 +106,12 @@ class SimulationResult:
     # Final BESS state
     bess_soc_final_kwh: float = 0.0
     bess_capacity_degraded_kwh: float = 0.0   # effective capacity after degradation
+
+    # Monthly peak grid demand (kW) — 12 values for demand charge calculation
+    monthly_peak_grid_kw: list[float] = field(default_factory=lambda: [0.0] * 12)
+
+    # Total BESS peak shaving energy (kWh/yr)
+    total_peak_shaving_kwh: float = 0.0
 
     # SLA pass/fail
     sla_pass: bool = True
@@ -473,6 +483,20 @@ class BackupDispatchEngine:
         result.outage_events_total = len(self.outage_events)
         result.outage_events_served = sum(1 for ens in event_ens.values() if ens < 1e-6)
 
+        # Monthly peak grid demand (kW) — for demand charge calculation
+        # Month boundaries (cumulative hours in a non-leap year)
+        month_starts = [0, 744, 1416, 2160, 2880, 3624, 4344, 5088, 5832, 6552, 7296, 8016, 8760]
+        monthly_peaks = []
+        for m in range(12):
+            h_start = month_starts[m]
+            h_end = month_starts[m + 1]
+            month_hours = results[h_start:h_end]
+            # Peak instantaneous grid draw (kW) — grid_to_load kWh in 1h slot ≈ kW
+            peak_kw = max((h.grid_to_load + h.grid_to_bess for h in month_hours), default=0.0)
+            monthly_peaks.append(peak_kw)
+        result.monthly_peak_grid_kw = monthly_peaks
+        result.total_peak_shaving_kwh = sum(h.bess_peak_shaving_kwh for h in results)
+
         # Backup autonomy: BESS (initial usable) + DG rated at critical peak
         result.backup_autonomy_hours = self._compute_autonomy()
 
@@ -488,31 +512,62 @@ class BackupDispatchEngine:
         solar_kwh: float,
         dt: float,
     ) -> None:
-        """Dispatch for grid-up fraction of the hour."""
+        """Dispatch for grid-up fraction of the hour (with TOU + peak shaving)."""
         load_kwh = self.total_kw[h] * dt
+
+        # Record TOU rate for this hour
+        hr.tou_rate_rs_kwh = self.config.grid.rate_for_hour(h)
 
         # 1. Solar → load
         solar_to_load = min(solar_kwh, load_kwh)
         load_remaining = load_kwh - solar_to_load
         solar_remaining = solar_kwh - solar_to_load
 
-        # 2. Grid → remaining load
-        hr.grid_to_load += load_remaining
         hr.solar_to_load += solar_to_load
 
-        # 3. Solar → BESS charge
+        # 2. BESS peak shaving (discharge during high-demand periods to reduce grid draw)
+        if (
+            self.bess
+            and not self.bess_failed[h]
+            and self.config.grid.demand_charge is not None
+            and self.config.grid.peak_shaving_enabled
+            and load_remaining > 0
+        ):
+            # Determine peak shaving target
+            target_kw = self.config.grid.peak_shaving_target_kw
+            if target_kw is None:
+                target_kw = float(self.total_kw.mean()) * 0.8
+
+            # Only shave if current grid draw would exceed target
+            current_grid_kw = load_remaining / dt if dt > 0 else 0.0
+            if current_grid_kw > target_kw:
+                shave_kw = current_grid_kw - target_kw
+                shaved = self.bess.discharge(shave_kw, dt)
+                hr.bess_peak_shaving_kwh += shaved
+                load_remaining -= shaved
+
+        # 3. Grid → remaining load
+        hr.grid_to_load += load_remaining
+
+        # 4. Solar → BESS charge
         if self.bess and not self.bess_failed[h] and solar_remaining > 0:
             taken = self.bess.charge(solar_remaining / dt, dt)
             hr.solar_to_bess += taken
             solar_remaining -= taken
 
-        # 4. Grid → BESS charge (to maintain target SOC)
+        # 5. Grid → BESS charge (to maintain target SOC; only during off-peak if TOU exists)
         if self.bess and not self.bess_failed[h]:
-            target_soc = self.bess.effective_capacity * 0.95
-            deficit_kwh = target_soc - self.bess.soc_kwh
-            if deficit_kwh > 0.01:
-                taken = self.bess.charge(deficit_kwh / dt, dt)
-                hr.grid_to_bess += taken
+            # During peak hours, avoid charging from grid (saves demand charge)
+            is_peak = (
+                self.config.grid.tou_schedule is not None
+                and self.config.grid.tou_schedule.is_peak_hour(h % 24)
+            )
+            if not is_peak:
+                target_soc = self.bess.effective_capacity * 0.95
+                deficit_kwh = target_soc - self.bess.soc_kwh
+                if deficit_kwh > 0.01:
+                    taken = self.bess.charge(deficit_kwh / dt, dt)
+                    hr.grid_to_bess += taken
 
     def _dispatch_grid_down(
         self,

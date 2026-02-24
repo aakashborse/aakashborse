@@ -2,6 +2,7 @@
 EnergeX — Exporters
 
 Exports simulation results to JSON, CSV, and warnings files.
+Includes Phase C: Monte Carlo and Optimizer result exports.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import json
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from energex.domain.schemas import ProjectConfig
 from energex.engine.dispatch_backup import SimulationResult
@@ -324,3 +325,56 @@ def export_all(
     files["warnings"] = export_warnings(warnings, out)
 
     return files
+
+
+# ---------------------------------------------------------------------------
+# Phase C — Monte Carlo export
+# ---------------------------------------------------------------------------
+
+def export_monte_carlo(mc_result, output_dir: str | Path) -> Path:
+    """Export Monte Carlo results to monte_carlo_results.json."""
+    out = Path(output_dir)
+    _ensure_dir(out)
+    path = out / "monte_carlo_results.json"
+
+    data = mc_result.to_dict()
+
+    # Also include per-run raw data
+    data["raw_runs"] = {
+        "ens_kwh": mc_result.ens_kwh_runs,
+        "downtime_hours": mc_result.downtime_hours_runs,
+        "continuity_pct": mc_result.continuity_pct_runs,
+        "npv_proxy_rs": mc_result.npv_proxy_runs,
+        "sla_pass": mc_result.sla_pass_runs,
+    }
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Phase C — Optimizer export
+# ---------------------------------------------------------------------------
+
+def export_optimizer(opt_result, output_dir: str | Path) -> dict[str, Path]:
+    """Export optimizer results to JSON + CSV."""
+    out = Path(output_dir)
+    _ensure_dir(out)
+
+    # Summary JSON
+    json_path = out / "optimizer_results.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(opt_result.to_dict(), f, indent=2, ensure_ascii=False)
+
+    # All candidates CSV
+    csv_path = out / "optimizer_all_candidates.csv"
+    if opt_result.all_points:
+        fieldnames = list(opt_result.all_points[0].to_dict().keys())
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for pt in opt_result.all_points:
+                writer.writerow(pt.to_dict())
+
+    return {"optimizer_results": json_path, "optimizer_candidates": csv_path}

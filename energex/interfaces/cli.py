@@ -351,6 +351,185 @@ def pdf(
 
 
 # ---------------------------------------------------------------------------
+# monte-carlo command  (Phase C)
+# ---------------------------------------------------------------------------
+
+@app.command(name="monte-carlo")
+def monte_carlo(
+    config: Path = typer.Option(
+        ..., "--config", "-c",
+        help="Path to config JSON/YAML file",
+        exists=True, readable=True, resolve_path=True,
+    ),
+    n_runs: int = typer.Option(200, "--n-runs", "-n", help="Number of MC runs"),
+    seed: int = typer.Option(42, "--seed", "-s", help="Base random seed"),
+    export: Path = typer.Option(
+        Path("energex_output"),
+        "--export", "-e",
+        help="Output directory for MC results",
+    ),
+    percentiles: str = typer.Option(
+        "10,25,50,75,90,99",
+        "--percentiles",
+        help="Comma-separated percentile list (e.g. '10,50,90')",
+    ),
+) -> None:
+    """Run Monte Carlo uncertainty analysis (P10/P50/P90/P99 confidence bands)."""
+    from energex.adapters.config_loader import load_config
+    from energex.engine.monte_carlo import MonteCarloEngine
+    from energex.domain.schemas import MonteCarloConfig
+    from energex.adapters.exporters import export_monte_carlo
+    from energex.engine.runner import run_grid_only_baseline
+
+    console.rule("[bold cyan]EnergeX — Monte Carlo Analysis[/bold cyan]")
+
+    with console.status("Loading config..."):
+        cfg = load_config(config)
+
+    pct_list = [float(p.strip()) for p in percentiles.split(",")]
+
+    mc_cfg = MonteCarloConfig(
+        n_runs=n_runs,
+        base_seed=seed,
+        percentiles=pct_list,
+    )
+
+    console.print(f"  Runs       : {n_runs}")
+    console.print(f"  Base seed  : {seed}")
+    console.print(f"  Percentiles: {pct_list}")
+    console.print()
+
+    with console.status("Computing baseline..."):
+        try:
+            bl = run_grid_only_baseline(cfg, seed=seed)
+            baseline_npv = bl.npv
+        except Exception:
+            baseline_npv = None
+
+    with console.status(f"Running {n_runs} Monte Carlo simulations..."):
+        engine = MonteCarloEngine(cfg, mc_config=mc_cfg, baseline_npv=baseline_npv)
+        mc_result = engine.run()
+
+    # Display summary
+    console.print()
+    console.rule("[bold]Monte Carlo Results[/bold]")
+    mc_table = Table(box=box.SIMPLE, show_header=True)
+    mc_table.add_column("Metric", style="cyan")
+    mc_table.add_column("Mean", justify="right")
+    mc_table.add_column("P50", justify="right")
+    mc_table.add_column("P90", justify="right")
+    mc_table.add_column("P99", justify="right")
+    mc_table.add_column("Unit")
+
+    for stats in [mc_result.ens_stats, mc_result.downtime_stats, mc_result.continuity_stats]:
+        if stats:
+            mc_table.add_row(
+                stats.metric,
+                f"{stats.mean:.2f}",
+                f"{stats.p50:.2f}",
+                f"{stats.p90:.2f}",
+                f"{stats.p99:.2f}",
+                stats.unit,
+            )
+    console.print(mc_table)
+
+    sla_color = "green" if mc_result.sla_pass_rate_pct >= 90 else "yellow" if mc_result.sla_pass_rate_pct >= 50 else "red"
+    console.print(f"  SLA Pass Rate: [{sla_color}]{mc_result.sla_pass_rate_pct:.1f}%[/{sla_color}]")
+
+    # Export
+    export.mkdir(parents=True, exist_ok=True)
+    mc_path = export_monte_carlo(mc_result, export)
+    console.print(f"\n[green]✓[/green] MC results → {mc_path}")
+
+
+# ---------------------------------------------------------------------------
+# optimize command  (Phase C)
+# ---------------------------------------------------------------------------
+
+@app.command()
+def optimize(
+    config: Path = typer.Option(
+        ..., "--config", "-c",
+        help="Path to config JSON/YAML file",
+        exists=True, readable=True, resolve_path=True,
+    ),
+    bess_max: float = typer.Option(500.0, "--bess-max", help="Max BESS capacity to sweep (kWh)"),
+    bess_step: float = typer.Option(50.0, "--bess-step", help="BESS step size (kWh)"),
+    include_dg: bool = typer.Option(False, "--include-dg/--no-dg", help="Include DG in sweep"),
+    include_solar: bool = typer.Option(False, "--include-solar/--no-solar", help="Include Solar in sweep"),
+    n_years: int = typer.Option(3, "--n-years", help="Years per candidate evaluation"),
+    seed: int = typer.Option(42, "--seed", "-s", help="Random seed"),
+    export: Path = typer.Option(
+        Path("energex_output"),
+        "--export", "-e",
+        help="Output directory for optimization results",
+    ),
+) -> None:
+    """Find optimal BESS/DG/Solar sizing using grid sweep + Pareto frontier."""
+    from energex.adapters.config_loader import load_config
+    from energex.engine.optimizer import SizingOptimizer
+    from energex.domain.schemas import SizingBounds
+    from energex.adapters.exporters import export_optimizer
+
+    console.rule("[bold cyan]EnergeX — Sizing Optimizer[/bold cyan]")
+
+    with console.status("Loading config..."):
+        cfg = load_config(config)
+
+    bounds = SizingBounds(
+        bess_capacity_max_kwh=bess_max,
+        bess_capacity_step_kwh=bess_step,
+        include_dg=include_dg,
+        include_solar=include_solar,
+        n_years_per_eval=n_years,
+    )
+
+    n_candidates = len([
+        (b, d, s)
+        for b in [bounds.bess_capacity_min_kwh + i * bess_step for i in range(int((bess_max - 0) / bess_step) + 2)]
+        for d in ([0, 50, 100, 150, 200, 250, 300] if include_dg else [0])
+        for s in ([0, 50, 100, 150, 200, 250, 300] if include_solar else [0])
+    ])
+    console.print(f"  BESS sweep : 0 → {bess_max:.0f} kWh step {bess_step:.0f}")
+    console.print(f"  DG sweep   : {'Yes' if include_dg else 'No'}")
+    console.print(f"  Solar sweep: {'Yes' if include_solar else 'No'}")
+    console.print(f"  Years/eval : {n_years}")
+    console.print()
+
+    with console.status("Running optimizer (this may take a minute)..."):
+        optimizer = SizingOptimizer(cfg, bounds=bounds, base_seed=seed)
+        opt_result = optimizer.run()
+
+    # Display results
+    console.print()
+    console.rule("[bold]Optimization Results[/bold]")
+    console.print(f"  Candidates evaluated  : {opt_result.n_candidates_evaluated}")
+    console.print(f"  SLA-feasible configs  : {opt_result.n_sla_feasible}")
+    console.print(f"  Pareto frontier points: {len(opt_result.pareto_points)}")
+
+    if opt_result.optimal_point:
+        opt = opt_result.optimal_point
+        console.print()
+        console.print(Panel(
+            f"[bold green]OPTIMAL CONFIGURATION[/bold green]\n"
+            f"  BESS: {opt.bess_kwh:.0f} kWh / {opt.bess_kw:.0f} kW\n"
+            f"  DG  : {opt.dg_kw:.0f} kW\n"
+            f"  Solar: {opt.solar_kwp:.0f} kWp\n"
+            f"  CAPEX: ₹{opt.capex_rs:,.0f}\n"
+            f"  Avg ENS: {opt.avg_ens_kwh:.1f} kWh/yr\n"
+            f"  Continuity: {opt.avg_continuity_pct:.4f}%",
+            expand=False,
+        ))
+
+    # Export
+    export.mkdir(parents=True, exist_ok=True)
+    files = export_optimizer(opt_result, export)
+    console.print()
+    for name, path in files.items():
+        console.print(f"  [green]✓[/green] {name:30s} → {path}")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

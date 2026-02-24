@@ -36,6 +36,7 @@ class YearCashflow:
 
     # Operating costs (negative = cost)
     grid_energy_cost: float = 0.0
+    demand_charge_rs: float = 0.0   # monthly peak demand charges
     diesel_fuel_cost: float = 0.0
     om_bess: float = 0.0
     om_solar: float = 0.0
@@ -52,6 +53,7 @@ class YearCashflow:
     def total_opex(self) -> float:
         return (
             self.grid_energy_cost
+            + self.demand_charge_rs
             + self.diesel_fuel_cost
             + self.om_bess
             + self.om_solar
@@ -146,11 +148,32 @@ class FinanceEngine:
             sim = self.results[min(yr - 1, len(self.results) - 1)]
             cf = YearCashflow(year=yr)
 
-            # Grid energy cost
+            # Grid energy cost — use TOU hourly rates if configured
             escalation = (1 + self.cfg.grid.escalation_pct_yr / 100) ** yr
-            grid_rate = self.cfg.grid.energy_rate_rs_kwh * escalation
-            cf.grid_energy_cost = sim.total_grid_kwh * grid_rate
-            cf.grid_energy_cost += self.cfg.grid.fixed_charge_rs_month * 12
+            if self.cfg.grid.tou_schedule is not None and sim.hourly:
+                # Sum per-hour grid draw × hour-specific TOU rate
+                grid_energy_cost = sum(
+                    (h.grid_to_load + h.grid_to_bess) * h.tou_rate_rs_kwh * escalation
+                    for h in sim.hourly
+                )
+            else:
+                grid_rate = self.cfg.grid.energy_rate_rs_kwh * escalation
+                grid_energy_cost = sim.total_grid_kwh * grid_rate
+            cf.grid_energy_cost = grid_energy_cost + self.cfg.grid.fixed_charge_rs_month * 12
+
+            # Demand charge — monthly peak kW × ₹/kVA/month
+            if self.cfg.grid.demand_charge is not None and sim.monthly_peak_grid_kw:
+                dc = self.cfg.grid.demand_charge
+                pf = dc.power_factor
+                annual_demand_charge = 0.0
+                for m, peak_kw in enumerate(sim.monthly_peak_grid_kw):
+                    if dc.peak_hours_only and self.cfg.grid.tou_schedule is not None:
+                        # Only bill months where peak occurred during TOU peak hours
+                        # Simplified: use the full monthly peak (conservative)
+                        pass
+                    peak_kva = peak_kw / pf
+                    annual_demand_charge += peak_kva * dc.charge_rs_kva_month
+                cf.demand_charge_rs = annual_demand_charge * escalation
 
             # Diesel fuel cost
             if self.cfg.dg is not None:
